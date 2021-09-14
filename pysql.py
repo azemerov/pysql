@@ -3,413 +3,420 @@ import ast
 
 SP = '  '
 
+class ListX(list):
+    def add(self, value):
+        if value is None:
+            pass
+        elif isinstance(value, (list, tuple)):
+            super().extend(value)
+        else:
+            super().append(value)
+            
 class PlSqlMaker(ast.NodeVisitor):
 
     def __init__(self):
-        self.offset = 0 # todo: use it to make indentations
-        self.output = [] # produces output lines
-        self.temp = None # temporary replacement for self.output, used when child lines should net directly produce output,, parent node will use their values stored in this list
-        self.remove_quote = False # is used to convert string literal into cursor
-        self.locals = {} # holds definitions of local variables
-        self.begin_index = 0 # index of the current function body
-        self.autofunc = 0 # sequenced number to distinguish auto-generated functions, i.e. for "select into" ones
+        self.offset = 0             # defines the indentation level
+        self.remove_quote = False   # is used to convert string literal into cursor
+        self.locals = {}            # holds definitions of local variables
+        self.funcs = []
+        self.autofunc = 0           # sequenced number to distinguish auto-generated functions, i.e. for "select into" ones
 
-    def start_temp(self):
-        self.temp = []
-        
-    def end_temp(self):
-        result = self.temp
-        self.temp = None
-        return result
+    def begin_index(self):
+        """index of the current function body"""
+        if not self.funcs:
+            return 0
+        else:
+            return self.funcs[-1]
 
-    def visit(self, node):
+    def visit(self, node, result, delim=None):
         """Override original function."""
-        method = 'visit_' + node.__class__.__name__
-        visitor = getattr(self, method, None)
-        if visitor is None:
-            self.add("\n--%s is not supported!!!\n" % node.__class__.__name__)
-            visitor = self.generic_visit
-        return visitor(node)
-
-
-    def sub_visit(self, node, delim=None):
-#~        self.offset += 1
         if node is None:
-            self.add("NULL")
+            result.add("NULL")
         elif isinstance(node, str):
-            self.add("'%s'"%node)
+            result.add("'%s'"%node)
         elif isinstance(node, int):
-            self.add(node)
+            result.add(node)
         elif isinstance(node, (list, tuple)):
             for i, x in enumerate(node):
                 if delim and i > 0:
-                    self.add(delim)
-                self.visit(x)
+                    result.add(delim)
+                self.visit(x, result)
         else:
-            self.visit(node)
-#~        self.offset -= 1
+            method = 'visit_' + node.__class__.__name__
+            visitor = getattr(self, method, None)
+            if visitor is None:
+                visitor = self.generic_visit
+            visitor(node, result)
+        
+        
+    def generic_visit(self, node, result):
+        """Called if no explicit visitor function exists for a node."""
+        result.add("\n--%s is not supported!!!\n" % node.__class__.__name__)
+        for field, value in iter_fields(node):
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, AST):
+                        result.add(self.visit(item))
+            elif isinstance(value, AST):
+                result.add(self.visit(value))
 
-    def indent(self):
-        return SP*self.offset
-
-    def add(self, arg):
-        arg = arg.replace('\n', '\n' + self.indent())
-        if self.temp is None:
-            self.output.append(arg)
-        else:
-            self.temp.append(arg)
+    def indent(self, adjust=0):
+        return SP*(self.offset+adjust)
 
     # Literals
-    def visit_Constant(self, node): # Py3.8
+    def visit_Constant(self, node, result): # Py3.8
         #Constant(value, kind)
-        self.add(node.value) #todo: depends on kind
+        result.add(node.value) #todo: depends on kind
 
-    def visit_Num(self, node):
+    def visit_Num(self, node, result):
         #Num(n) <Py 3.8
-        self.add(str(node.n))
+        result.add(str(node.n))
 
-    def visit_Str(self, node):
+    def visit_Str(self, node, result):
         #Str(s) <Py 3.8
         if self.remove_quote:
-            self.add(node.s)
+            result.add(node.s)
         else:
-            self.add("'%s'"%node.s)
+            result.add("'%s'"%node.s)
         
-    def visit_FormattedValue(self, node):
+    def visit_FormattedValue(self, node, result):
         #FormattedValue(value, conversion, format_spec) 3.6
         #self.add(str(node.conversion))
         if node.format_spec:
-            self.add("to_char(")
-        self.sub_visit(node.value)
+            result.add("to_char(")
+        self.visit(node.value, result)
         if node.format_spec:
-            self.add(", ")
-            self.visit(node.format_spec)
-            self.add(")")
-            
+            result.add(", ")
+            self.visit(node.format_spec, result)
+            result.add(")")
         #todo:
-        #self.sub_visit(node.conversion)
-        #self.sub_visit(node.format_spec)
+        #self.visit(node.conversion, result)
+        #self.visit(node.format_spec, result)
 
-    def visit_JoinedStr(self, node):
+    def visit_JoinedStr(self, node, result):
         #JoinedStr(values)
         #todo
         for i, x in enumerate(node.values):
             if i> 0:
-                self.add(" || ")
-            self.visit(x)
+                result.add(" || ")
+            self.visit(x, result)
 
-    def visit_Bytes(self, node):
+    def visit_Bytes(self, node, result):
         #Bytes(s), <Py 3.8
-        self.add(node.s)
+        result.add(node.s)
 
-    def visit_List(self, node):
+    def visit_List(self, node, result):
         #List(elts, ctx)
-        self.add("(")
+        result.add("(")
         for x in node.elts:
-            self.visit(x)
-            self.add(",")
-        self.add(") /*list*/")
+            self.visit(x, result)
+            result.add(",")
+        result.add(") /*list*/")
         
-    def visit_Tuple(self, node):
+    def visit_Tuple(self, node, result):
         #Tuple(elts, ctx)
-        self.add("(")
+        result.add("(")
         for x in node.elts:
-            self.visit(x)
-            self.add(",")
-        self.add(") /*tuple*/")
+            self.visit(x, result)
+            result.add(",")
+        result.add(") /*tuple*/")
 
-    def visit_Set(self, node):
+    def visit_Set(self, node, result):
         #Set(elts)
-        self.add("(")
+        result.add("(")
         for x in node.elts:
-            self.visit(x)
-            self.add(",")
-        self.add(") /*set*/")
+            self.visit(x, result)
+            result.add(",")
+        result.add(") /*set*/")
 
-    def visit_Dict(self, node):
+    def visit_Dict(self, node, result):
         #Dict(keys, values)
-        self.add("not supported")
+        result.add("/*!!! Dict is not supported! !!!*/")
 
 #Ellipsis
 
-    def visit_NameConstant(self, node):
+    def visit_NameConstant(self, node, result):
         #NameConstant(value)
-        self.sub_visit(node.value)
+        self.visit(node.value, result)
 
     # Variables
 
-    def visit_Name(self, node):
+    def visit_Name(self, node, result):
         #Name(id, ctx)
-        self.add(node.id)
+        result.add(node.id)
 
-    def visit_Load(self, node):
+    def visit_Load(self, node, result):
         #Load
         pass
 
-    def visit_Store(self, node):
+    def visit_Store(self, node, result):
         #Store
         pass
 
-    def visit_Del(self, node):
+    def visit_Del(self, node, result):
         #Del
         pass
 
-    def visit_Starred(self, node):
+    def visit_Starred(self, node, result):
         #Starred(value, ctx)
         pass
 
 
     # Expressions
 
-    def visit_Expr(self, node):
+    def visit_Expr(self, node, result):
         #Expr(value)
-        self.sub_visit(node.value)
+        result.add('\n%s' % self.indent())
+        self.visit(node.value, result)
         if isinstance( node.value, ast.Call) and (node.value.func.id in self._sys_funcs):
             pass
         else:
-            self.add(';\n')
+            result.add(';')
 
-    def visit_NamedExpr(self, node):
+    def visit_NamedExpr(self, node, result):
         #NamedExpr(target, value) >=Py3.8 
         pass
 
-    def visit_UnaryOp(self, node):
+    def visit_UnaryOp(self, node, result):
         #UnaryOp(op, operand)
         #import pdb; pdb.set_trace()
         if isinstance(node.op, (ast.UAdd, ast.USub)):
-            self.visit(node.operand)
-            self.add("1;")
+            self.visit(node.operand, result)
+            result.add("1;")
         elif isinstance(node.op, (ast.Not, ast.Invert)):
-            self.visit(node.op)
-            self.visit(node.operand)
+            self.visit(node.op, result)
+            self.visit(node.operand, result)
 
-    def visit_UAdd(self, node):
+    def visit_UAdd(self, node, result):
        #UAdd
-       self.add('+') # todo: for strings convert to || operator
-    def visit_USub(self, node):
+       result.add(' + ') # todo: for strings convert to || operator
+    def visit_USub(self, node, result):
        #USub
-       self.add('-')
-    def visit_Not(self, node):
+       result.add(' - ')
+    def visit_Not(self, node, result):
        #Not
-       self.add(' not ')
-    def visit_Invert(self, node):
+       result.add(' not ')
+    def visit_Invert(self, node, result):
        #Invert
-       self.add('-')
+       result.add(' - ')
 
-    def visit_BinOp(self, node):
+    def visit_BinOp(self, node, result):
         #BinOp(left, op, right)
-        self.sub_visit(node.left)
-        self.sub_visit(node.op)
-        self.sub_visit(node.right)
+        self.visit(node.left, result)
+        self.visit(node.op, result)
+        self.visit(node.right, result)
 
-    def visit_Add(self, node):
+    def visit_Add(self, node, result):
         #Add
-        self.add('+')
+        result.add(' + ')
 
-    def visit_Sub(self, node):
+    def visit_Sub(self, node, result):
         #Sub
-        self.add('-')
+        result.add(' - ')
 
-    def visit_Mult(self, node):
+    def visit_Mult(self, node, result):
         #Mult
-        self.add('Mult')
+        result.add('todo:Mult')
 
-    def visit_Div(self, node):
+    def visit_Div(self, node, result):
         #Div
-        self.add('Div')
+        result.add('todo:Div')
 
-    def visit_FloorDiv(self, node):
+    def visit_FloorDiv(self, node, result):
         #FloorDiv
-        self.add('FloorDiv')
+        result.add('todo:FloorDiv')
 
-    def visit_Mod(self, node):
+    def visit_Mod(self, node, result):
         #Mod
-        self.add('Mod')
+        result.add('todo:Mod')
 
-    def visit_Pow(self, node):
+    def visit_Pow(self, node, result):
         #Pow
-        self.add('Pow')
+        result.add('todo:Pow')
 
-    def visit_LShift(self, node):
+    def visit_LShift(self, node, result):
         #LShift
-        self.add('LShift')
+        result.add('todo:LShift')
 
-    def visit_RShift(self, node):
+    def visit_RShift(self, node, result):
         #RShift
-        self.add('RShift')
+        result.add('todo:RShift')
 
-    def visit_BitOr(self, node):
+    def visit_BitOr(self, node, result):
         #BitOr
-        self.add('BitOr')
+        result.add('todo:BitOr')
 
-    def visit_BitXor(self, node):
+    def visit_BitXor(self, node, result):
         #BitXor
-        self.add('BitXor')
+        result.add('todo:BitXor')
 
-    def visit_BitAnd(self, node):
+    def visit_BitAnd(self, node, result):
         #BitAnd
-        self.add('BitAnd')
+        result.add('todo:BitAnd')
 
-    def visit_MatMult(self, node):
+    def visit_MatMult(self, node, result):
         #MatMult
-        self.add('MatMult')
+        result.add('todo:MatMult')
 
-    def visit_BoolOp(self, node):
+    def visit_BoolOp(self, node, result):
         #BoolOp(op, values)
-        self.add('BoolOp')
-        self.sub_visit(node.op)
-        self.sub_visit(node.values)
+        result.add('todo:BoolOp')
+        self.visit(node.op, result)
+        self.visit(node.values, result)
 
-    def visit_And(self, node):
+    def visit_And(self, node, result):
         #And
-        self.add('And')
+        result.add(' and ')
 
-    def visit_Or(self, node):
+    def visit_Or(self, node, result):
         #Or
-        self.add('Or')
+        result.add(' or ')
 
-    def visit_Compare(self, node):
+    def visit_Compare(self, node, result):
         #Compare(left, ops, comparators)
-        self.add('Compare')
-        self.sub_visit(node.left)
-        self.sub_visit(node.ops)
-        self.sub_visit(node.comparators)
+        self.visit(node.left, result)
+        self.visit(node.ops, result)
+        self.visit(node.comparators, result)
 
-    def visit_Eq(self, node):
+    def visit_Eq(self, node, result):
         #Eq
-        self.add('Eq')
+        result.add(' = ')
 
-    def visit_NotEq(self, node):
+    def visit_NotEq(self, node, result):
         #NotEq
-        self.add('NotEq')
+        result.add(' != ')
 
-    def visit_Lt(self, node):
+    def visit_Lt(self, node, result):
         #Lt
-        self.add('Lt')
+        result.add(' < ')
 
-    def visit_LtE(self, node):
+    def visit_LtE(self, node, result):
         #LtE
-        self.add('LtE')
+        result.add(' <= ')
 
-    def visit_Gt(self, node):
+    def visit_Gt(self, node, result):
         #Gt
-        self.add('Gt')
+        result.add(' > ')
 
-    def visit_GtE(self, node):
+    def visit_GtE(self, node, result):
         #GtE
-        self.add('GtE')
+        result.add(' >= ')
 
-    def visit_Is(self, node):
+    def visit_Is(self, node, result):
         #Is
-        self.add('Is')
+        result.add('todo:Is')
 
-    def visit_IsNot(self, node):
+    def visit_IsNot(self, node, result):
         #IsNot
-        self.add('IsNot')
+        result.add('todo:IsNot')
 
-    def visit_In(self, node):
+    def visit_In(self, node, result):
         #In
-        self.add('In')
+        result.add(' in ')
 
-    def visit_NotIn(self, node):
+    def visit_NotIn(self, node, result):
         #NotIn
-        self.add('NotIn')
+        result.add(' not in ')
 
     _sys_funcs = {'_var': '', '_type': 'type ', '_subtype': 'subtype ', '_fetch': '',}
     _alias = {'print': 'dbms_output.put_line',}
-    def visit_Call(self, node):
+    def visit_Call(self, node, result):
         #Call(func, args, keywords, starargs, kwargs)
-        if node.func.id == '_fetch':
-            # .. todo: implement as a local function
-            #import pdb; pdb.set_trace()
-            self.start_temp()
-            for x in node.args: self.visit(x)
-            temp = self.end_temp()
-            fetch = []
+        if node.func.id == '_selectinto':
+            temp = ListX([])
+            for x in node.args: self.visit(x, temp)
+            fetch = ListX([])
+            #self.offset += 1
+            fetch.add('\n%sfunction select_into_%s(%s) return boolan as' % (self.indent(), self.autofunc, ', '.join(['%s out %s' % (x, self.locals.get(x,'varchar2')) for x in temp[1:]])))
+            fetch.add('\n%sbegin' % self.indent())
             self.autofunc += 1
-            fetch.append('\nfunction select_into_%s(%s) return boolan as\nbegin\n' % (self.autofunc, ', '.join(['%s out %s' % (x, self.locals.get(x,'varchar2')) for x in temp[1:]])))
             select = temp[0].strip()[1:-1] # remove quotes
             i = select.find('from')
             select = select[:i] + ' into %s' % ', '.join(temp[1:]) +' '+select[i:]
-            fetch.append(SP+select)
-            fetch.append(';\n%sreturn := True;\n' % SP)
-            fetch.append('exception when no_data_found then\n')
-            fetch.append('%sreturn False;\n' % SP)
-            fetch.append('end;')
-            fetch = [x.replace('\n', '\n'+self.indent()) for x in fetch]
+            fetch.add('\n%s  %s' % (self.indent(), select))
+            fetch.add(';\n%s  return := True;' % self.indent())
+            fetch.add('\n%sexception when no_data_found then' % self.indent())
+            fetch.add('\n%s  return False;' % self.indent())
+            fetch.add('\n%send;' % self.indent())
+            #self.offset -= 1
             #self.output[self.currentIf:self.currentIf] = fetch
-            self.output[self.begin_index:self.begin_index] = fetch
-            self.add('select_into_%d(%s)' % (self.autofunc, ', '.join(temp[1:])))
+            result[self.begin_index():self.begin_index()] = fetch # todo: correct insert line position
+            result.add('select_into_%d(%s)' % (self.autofunc, ', '.join(temp[1:])))
             # also see visit_Expr() which has explicitly removre ';' after  pseudo function calls
         elif node.func.id in self._sys_funcs:
-            self.start_temp()
-            self.sub_visit(node.args)
-            n = self.temp[0] # name
-            v = self.temp[1] # definition
-            if len(self.temp)>2:
-                v = '%s(%s)' % (v, self.temp[2])
+            result.pop(-1) # remove new line originated by visit_Expr()
+            temp = ListX([])
+            self.visit(node.args, temp)
+            n = temp[0] # name
+            v = temp[1] # definition
+            if len(temp)>2:
+                v = '%s(%s)' % (v, temp[2])
 
             t = self._sys_funcs.get(node.func.id, '')
-            self.end_temp()
-            self.output.insert(self.begin_index, '\n' + self.indent() + '%s%s %s;--from _sys_func' % (t, n, v))  # move before "begin" line
+            result.insert(self.begin_index(), '\n%s%s%s %s;--from _sys_func' % (self.indent(), t, n, v))  # move before "begin" line # todo: correct insert line position
+            self.funcs[-1] += 1
             if node.func.id == '_var':
                 self.locals[n] = v
-            # also see visit_Expr() which has explicitly removre ';' after pseudo function calls
+            # also see visit_Expr() which has explicitly remove ';' after pseudo function calls
         else:
             fname = self._alias.get(node.func.id, node.func.id)
-            self.add('%s (' %fname)
-            self.sub_visit(node.args, ',')
-            self.sub_visit(node.keywords, ',')
-            #<Py3.5 self.sub_visit(node.starargs)
-            #<Py3.5 self.sub_visit(node.kwargs)
-            self.add(')')
+            result.add('%s (' %fname)
+            self.visit(node.args, result, ',')
+            self.visit(node.keywords, result, ',')
+            #<Py3.5 self.visit(node.starargs)
+            #<Py3.5 self.visit(node.kwargs)
+            result.add(')')
 
-    def visit_keyword(self, node):
+    def visit_keyword(self, node, result):
         #keyword(arg, value)
-        self.add('keyword')
-        self.sub_visit(node.arg, ',')
-        self.sub_visit(node.value)
+        result.add('keyword')
+        self.visit(node.arg, result, ',')
+        self.visit(node.value, result)
 
-    def visit_IfExp(self, node):
+    def visit_IfExp(self, node, result):
         #IfExp(test, body, orelse)
-        self.add('if ')
-        self.sub_visit(node.test)
-        self.add(' then\n')
-        self.sub_visit(node.body, None)
-        self.add('\nelse\n')
-        self.sub_visit(node.orelse, None)
-        self.add('\nend if;\n')
+        result.add('%sif ' % self.indent())
+        self.visit(node.test, result)
+        result.add(' then')
+        self.offset += 1
+        self.visit(node.body, result, None)
+        self.offset -= 1
+        result.add('\n%selse' % self.indent())
+        self.offset += 1
+        self.visit(node.orelse, result, None)
+        self.offset -= 1
+        result.add('\n%send if;' % self.indent())
 
-    def visit_Attribute(self, node):
+    def visit_Attribute(self, node, result):
         #Attribute(value, attr, ctx)
         if isinstance(node.value, ast.Name):
-            self.add('%s.%s' % (node.value.id, node.attr))
+            result.add('%s.%s' % (node.value.id, node.attr))
         else:
-            self.add('%s.%s' %  (node.value, node.attr)) # todo:expand node.name
+            result.add('%s.%s' %  (node.value, node.attr)) # todo:expand node.name
 
     # Subscripting
-    def visit_Subscript(self, node):
+    def visit_Subscript(self, node, result):
         #Subscript(value, slice, ctx)
         pass
-        #self.sub_visit(node.value)
-        #self.sub_visit(node.slice)
+        #self.visit(node.value)
+        #self.visit(node.slice)
 
-    def visit_Index(self, node):
+    def visit_Index(self, node, result):
         #Index(value)
-        self.add('Index')
-        self.sub_visit(node.value)
+        result.add('Index')
+        self.visit(node.value, result)
 
-    def visit_Slice(self, node):
+    def visit_Slice(self, node, result):
         #Slice(lower, upper, step)
-        self.add('Slice')
-        self.sub_visit(node.lower)
-        self.sub_visit(node.upper)
-        self.sub_visit(node.step)
+        result.add('Slice')
+        self.visit(node.lower, result)
+        self.visit(node.upper, result)
+        self.visit(node.step, result)
 
-    def visit_ExtSlice(self, node):
+    def visit_ExtSlice(self, node, result):
         #ExtSlice(dims)
-        self.add('ExtSlice')
-        self.sub_visit(node.dims)
+        result.add('ExtSlice')
+        self.visit(node.dims, result)
 
     # Comprehensions
 #ListComp(elt, generators)
@@ -419,250 +426,252 @@ class PlSqlMaker(ast.NodeVisitor):
 #comprehension(target, iter, ifs, is_async)
 
     # Statements
-    def visit_Assign(self, node):
+    def visit_Assign(self, node, result):
         #Assign(targets, value, type_comment)
         #self.add('Assign')
-        self.sub_visit(node.targets)
-        self.add(' := ')
-        self.sub_visit(node.value)
-        self.add(';\n')
+        result.add('\n%s' % self.indent())
+        self.visit(node.targets, result)
+        result.add(' := ')
+        self.visit(node.value, result)
+        result.add(';')
 
-    def visit_AnnAssign(self, node):
+    def visit_AnnAssign(self, node, result):
         #AnnAssign(target, annotation, value, simple) Py3.6
-        self.sub_visit(node.target)
-        self.add(' := ')
-        #? self.sub_visit(node.annotation)
-        self.sub_visit(node.value)
-        self.add(';\n')
-        #? self.sub_visit(node.simple)
+        result.add('\n%s' % self.indent())
+        self.visit(node.target, result)
+        result.add(' := ')
+        #? self.visit(node.annotation)
+        self.visit(node.value, result)
+        result.add(';')
+        #? self.visit(node.simple)
 
-    def visit_AugAssign(self, node):
+    def visit_AugAssign(self, node, result):
         #AugAssign(target, op, value)
-        self.sub_visit(node.target)
-        self.add(' := ')
-        self.sub_visit(node.target)
-        self.sub_visit(node.op)
-        self.sub_visit(node.value)
-        self.add(';\n')
+        result.add('\n%s' % self.indent())
+        self.visit(node.target, result)
+        result.add(' := ')
+        self.visit(node.target, result)
+        self.visit(node.op, result)
+        self.visit(node.value, result)
+        result.add(';')
 
 #Print(dest, values, nl) Py2 only
 
-    def visit_Raise(self, node):
+    def visit_Raise(self, node, result):
         #Raise(exc, cause)
-        self.add('raise')
-        self.sub_visit(node.exc)
-        self.add(';')
-        #? self.sub_visit(node.cause)
+        result.add('\n%sraise' % self.indent())
+        self.visit(node.exc, result)
+        result.add(';')
+        #? self.visit(node.cause)
 
-    def visit_Assert(self, node):
+    def visit_Assert(self, node, result):
         #Assert(test, msg)
-        self.add('Assert')
-        self.sub_visit(node.test)
-        self.sub_visit(node.msg)
+        result.add('todo:Assert')
+        self.visit(node.test, result)
+        self.visit(node.msg, result)
 
 #Delete(targets)
 
-    def visit_Pass(self, node):
+    def visit_Pass(self, node, result):
         #Pass
-        self.add('Pass')
+        result.add('\n%snull;' % self.indent())
 
     # Imports
-    def visit_Import(self, node):
+    def visit_Import(self, node, result):
         #Import(names)
-        self.add('Import')
-        self.sub_visit(node.names)
+        result.add('\n%stodo:Import ' % self.indent())
+        self.visit(node.names, result)
 
-    def visit_ImportFrom(self, node):
+    def visit_ImportFrom(self, node, result):
         #ImportFrom(module, names, level)
-        self.add('ImportFrom')
-        self.sub_visit(node.module)
-        self.sub_visit(node.names)
-        self.sub_visit(node.level)
+        result.add('todo:ImportFrom')
+        self.visit(node.module, result)
+        self.visit(node.names, result)
+        self.visit(node.level, result)
 
-    def visit_alias(self, node):
+    def visit_alias(self, node, result):
         #alias(name, asname) TODO:
-        self.add('alias %s %s' % (node.name, node.asname))
+        result.add('todo:alias %s %s' % (node.name, node.asname))
 
     # Control Flow
     
-    def visit_If(self, node):
+    def visit_If(self, node, result):
         #If(test, body, orelse)
-        self.currentIf = len(self.output)
-        self.add('\nif ')
-        self.sub_visit(node.test)
+        self.currentIf = len(result)
+        result.add('\n%sif ' % self.indent())
+        self.visit(node.test, result)
+        result.add(' then')
         self.offset += 1
-        self.add(' then\n')
         #import pdb; pdb.set_trace()
-        self.sub_visit(node.body, None)
+        self.visit(node.body, result)
+        result.add('\n%selse' % self.indent(-1))
+        self.visit(node.orelse, result)
         self.offset -= 1
-        self.add('\n')
-        self.offset += 1
-        self.add('else\n')
-        self.sub_visit(node.orelse, None)
-        self.offset -= 1
-        self.add('\nend if;\n')
+        result.add('\n%send if;' % self.indent())
         
-    def visit_For(self, node):
-        self.add('\nfor ')
-        self.visit(node.target)
-        self.add(' in (\n'+SP)
+    def visit_For(self, node, result):
+        result.add('\n%sfor ' % self.indent())
+        self.visit(node.target, result)
+        result.add(' in (\n%s' % self.indent(1))
         self.remove_quote = True
-        self.visit(node.iter) # todo: convert from string to cursor
+        self.visit(node.iter, result) # todo: convert from string to cursor
         self.remove_quote = False
-        self.add('\n )')
+        result.add('\n%s)' % self.indent())
+        result.add('\n%sloop' % self.indent())
         self.offset += 1
-        self.add('loop\n')
-        self.sub_visit(node.body, None)
-        #not used? self.sub_visit(node.orelse)
+        self.visit(node.body, result)
+        #not used? self.visit(node.orelse)
         self.offset -= 1
-        self.add('\nend loop;\n')
+        result.add('\n%send loop;' % self.indent())
         
 
-    def visit_While(self, node):
+    def visit_While(self, node, result):
         #While(test, body, orelse)
-        self.add('While')
-        self.sub_visit(node.test)
+        result.add('\n%swhile ' % self.indent())
+        self.visit(node.test, result)
+        result.add('\n%sloop' % self.indent())
         self.offset += 1
-        self.sub_visit(node.body, None)
-        self.sub_visit(node.orelse, None)
+        self.visit(node.body, result)
+        #todo? self.visit(node.orelse, result)
         self.offset -= 1
+        result.add('\n%send loop;' % self.indent())
 
-    def visit_Break(self, node):
+    def visit_Break(self, node, result):
         #Break
-        self.add('Break')
+        result.add('\n%sbreak;' % self.indent())
 
-    def visit_Continue(self, node):
+    def visit_Continue(self, node, result):
         #Continue
-        self.add('Continue')
+        result.add('\n%scontinue;' % self.indent())
 
-    def visit_Try(self, node):
-        #Try(body, handlers, orelse, finalbody)
-        self.add('\n')
+    def visit_Try(self, node, result):
+        #Try(body, handlers, orelse, finalbody) >= Py3.3
+        result.add('\n%sbegin' % self.indent())
         self.offset += 1
-        self.add('begin\n')
-        for x in node.body: self.visit(x)
+        for x in node.body: self.visit(x, result)
+        result.add('\n%sexception ' % self.indent(-1))
+        self.visit(node.handlers, result)
+        #todo: self.visit(node.orelse)
+        result.add('\n%sfinally' % self.indent(-1))
+        self.visit(node.finalbody, result)
         self.offset -= 1
-        self.add('\nexception ')
-        self.offset += 1
-        self.sub_visit(node.handlers)
-        #todo: self.sub_visit(node.orelse)
-        self.offset -= 1
-        self.add('\n')
-        self.offset += 1
-        self.add('finally--try\n') # ??
-        self.sub_visit(node.finalbody, None)
-        self.offset -= 1
-        self.add("\nend;--try\n")
+        result.add("\n%send;" % self.indent())
         
-    def visit_TryFinally(self, node):
-        #TryFinally(body, finalbody)
-        self.add('\n')
+    def visit_TryFinally(self, node, result):
+        #TryFinally(body, finalbody) <= Py#3.2
+        result.add('\n')
         self.offset += 1
-        self.add('begin\n')
-        for x in node.body: self.visit(x)
+        result.add('begin\n')
+        for x in node.body: self.visit(x, result)
+        result.add('\n%sfinally' % self.indent(-1))
+        self.visit(node.finalbody, result)
         self.offset -= 1
-        self.add('\n')
-        self.offset += 1
-        self.add('finally--try.finally\n') # ??
-        self.sub_visit(node.finalbody, None)
-        self.offset -= 1
-        self.add("\nend;--try-finally\n")
+        result.add("\n%send;" % self.indent())
 
-    def visit_TryExcept(self, node):
-        #TryExcept(body, handlers, orelse)
-        self.add('\n')
+    def visit_TryExcept(self, node, result):
+        #TryExcept(body, handlers, orelse) <= Py#3.2
         self.offset += 1
-        self.add('begin\n')
-        for x in node.body: self.visit(x)
+        result.add('\n%sbegin\n%s' % (self.indent(-1), self.indent()))
+        for x in node.body: self.visit(x, result)
+        result.add('\n%sexception ' % self.indent(-1))
+        self.visit(node.handlers, result)
+        #todo:self.visit(node.orelse, result)
         self.offset -= 1
-        self.add('\nexception ')
-        self.sub_visit(node.handlers)
-        #todo:self.sub_visit(node.orelse)
-        self.add("\nend;--try.except\n")
+        result.add("\n%send;" % self.indent())
 
-    def visit_ExceptHandler(self, node):
+    def visit_ExceptHandler(self, node, result):
         #ExceptHandler(type, name, body)
-        self.add('when ')
-        self.sub_visit(node.type)
-        self.add(' then\n')
-        self.add(node.name + ' := sql%errcode;\n');
-        self.sub_visit(node.body, None)
+        result.add('when ')
+        self.visit(node.type, result)
+        result.add(' then\n')
+        result.add('%s%s := %s;' % (self.indent(), node.name, 'sql%errcode'));
+        self.visit(node.body, result)
         
 #With(items, body, type_comment)
 #withitem(context_expr, optional_vars)
 
     # Function and class definitions
 
-    def visit_FunctionDef(self, node):
+    def visit_FunctionDef(self, node, result):
         #FunctionDef(name, args, body, decorator_list, returns, type_comment)
         self.locals = {}
         self.autofunc = 0
-        self.add('procedure %s (' % node.name) # todo: switch betwee procedure and function
-        self.sub_visit(node.args)
-        self.add(') as\n')
+        func = ListX()
+        # todo: correct insert line position for enclosed functions
+        func.add('\n%sprocedure %s (' % (self.indent(), node.name)) # todo: switch betwee procedure and function
+        self.visit(node.args, func)
+        func.append(') as')
         # for x in node.decorator_list:
             # #import pdb; pdb.set_trace()
-            # self.visit(x)
-            # self.add(';--local var\n')
-        self.begin_index = len(self.output) #todo: use stack of values to support enclosed functions with their own locals
-        self.add('\nbegin\n')
+            # self.visit(x, func)
+            # func.add(';--local var\n')
+        self.funcs.append(len(func)) #use stack of values to support enclosed functions with their own locals
+        func.add('\n%sbegin--procedure' % self.indent())
         self.offset += 1
-        for x in node.body: self.visit(x)
-        #self.sub_visit(node.decorator_list)
-        #?self.sub_visit(node.returns)
+        for x in node.body: self.visit(x, func)
+        #self.visit(node.decorator_list)
+        #?self.visit(node.returns)
         self.offset -= 1
-        self.add('end;--procedure\n')
+        func.add('\n%send;--procedure %s' % (self.indent(), node.name))
+        self.funcs.pop(-1)
+        result[self.begin_index():self.begin_index()] = func
 
 #Lambda(args, body)
 
-    def visit_arguments(self, node):
+    def visit_arguments(self, node, result):
         #arguments(posonlyargs, args, vararg, kwonlyargs, kw_defaults, kwarg, defaults)
-        #py3.8: self.sub_visit(node.posonlyargs)
-        self.sub_visit(node.args, ', ')
-        if node.vararg: self.sub_visit(node.vararg)
-        self.sub_visit(node.kwonlyargs)
-        if node.kwarg: self.sub_visit(node.kwarg)
-        self.sub_visit(node.kw_defaults)
+        #py3.8: self.visit(node.posonlyargs)
+        self.visit(node.args, result, ', ')
+        if node.vararg: self.visit(node.vararg, result)
+        self.visit(node.kwonlyargs, result)
+        if node.kwarg: self.visit(node.kwarg, result)
+        self.visit(node.kw_defaults, result)
         
-    def visit_arg(self, node):
+    def visit_arg(self, node, result):
         #arg(arg, annotation, type_comment)
-        self.add('%s %s' % (
+        result.add('%s %s' % (
             node.arg, 
             node.annotation.id if isinstance(node.annotation, ast.Name) \
             else node.annotation.s if isinstance(node.annotation, ast.Str) \
             else node.annotation))
         
-    def visit_Return(self, node):
+    def visit_Return(self, node, result):
         #Return(value)
-        self.add('return %s' % node.value)
+        result.add('\n%sreturn ' % self.indent())
+        self.visit(node.value, result)
+        result.add(';')
 
 #Yield(value)
 #YieldFrom(value)
 #Global(names)
 #Nonlocal(names)
-    def visit_ClassDef(self, node):
+
+    def visit_ClassDef(self, node, result):
         #ClassDef(name, bases, keywords, starargs, kwargs, body, decorator_list) 
-        self.add('ClassDef' % node.name)
-        self.sub_visit(node.bases)
-        self.sub_visit(node.keywords)
-        self.sub_visit(node.starargs)
-        self.sub_visit(node.kwargs)
-        self.sub_visit(node.body, None)
-        self.sub_visit(node.decorator_list)
+        result.add('todo:ClassDef' % node.name) # what for, maybe package?
+        self.visit(node.bases, result)
+        self.visit(node.keywords, result)
+        self.visit(node.starargs, result)
+        self.visit(node.kwargs, result)
+        self.visit(node.body, result, None)
+        self.visit(node.decorator_list, result)
 
     # Async and await
-    
+
 #AsyncFunctionDef(name, args, body, decorator_list, returns, type_comment)
 #Await(value)
 #AsyncFor(target, iter, body, orelse)
 #AsyncWith(items, body)
 #async for loops and async with context managers. They have the same fields as For and With, respectively. Only valid in the body of an AsyncFunctionDef.
 
-    def visit_Module(self, node):
+    def visit_Module(self, node, result):
         #Module(stmt* body, type_ignore *type_ignores)
-        self.add('--****** module ******\n')
-        self.sub_visit(node.body, None) #for x in node.body: self.visit(x)
-        self.add('--****** end of module ******\n')
+        result.add('--****** module ******\n')
+        self.funcs.append(len(result))
+        self.visit(node.body, result, None) #for x in node.body: self.visit(x)
+        result.add('\n--****** end of module ******\n')
+        self.funcs.pop(-1)
+
 #Interactive(stmt* body)
 #Expression(expr body)
 
@@ -672,8 +681,9 @@ def do_plsql(fname):
     content = f.read()
     root = ast.parse(content)
     p = PlSqlMaker()
-    p.visit(root)
-    print(''.join(p.output))
+    result = ListX([])
+    p.visit(root, result)
+    print(''.join(result))
 
 if __name__=='__main__':
     if len(sys.argv) > 1:

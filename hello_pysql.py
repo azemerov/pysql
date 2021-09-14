@@ -6,8 +6,13 @@ def main(a: integer, b: string, c: date):
     _var(i, integer)     # pseudo function to declare variable
     _var(x, integer)     # pseudo function to declare variable
     _var(y, integer)     # pseudo function to declare variable
+
+    def increment(param:integer):
+        return param + 1
+
     
-    for x in ("select 'Alex' as name, 'home' as place, sysdate as now from dual"):
+    for x in ("""select 'Alex' as name, 'home' as place, sysdate as now
+    from dual"""):
         print(f"{x.name} sends hello from {x.place} at {x.now:hh24:mi:ss}")
         i = i + 123
         i += 1
@@ -27,7 +32,7 @@ def main(a: integer, b: string, c: date):
     else:
         i = 2
 
-    if _fetch("select 1, 2 from dual", x, y):
+    if _selectinto("select 1, 2 from dual", x, y):
         print(f'i={i}, y={y}')
     else:
         raise "Error" # TODO:
