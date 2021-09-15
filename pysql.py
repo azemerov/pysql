@@ -1,17 +1,27 @@
 import sys
 import ast
+import re
+import pickle
 
 SP = '  '
 
+def loc_tag(node):
+    return '/*%d:%d*/' % (node.lineno, node.col_offset)
+
 class ListX(list):
-    def add(self, value):
+    def add(self, value, node=None):
         if value is None:
             pass
         elif isinstance(value, (list, tuple)):
             super().extend(value)
         else:
             super().append(value)
-            
+        if node:
+            self.add_loc(node)
+
+    def add_loc(self, node):
+        self.add(loc_tag(node))
+
 class PlSqlMaker(ast.NodeVisitor):
 
     def __init__(self):
@@ -77,7 +87,7 @@ class PlSqlMaker(ast.NodeVisitor):
         if self.remove_quote:
             result.add(node.s)
         else:
-            result.add("'%s'"%node.s)
+            result.add("'%s'" % node.s)
         
     def visit_FormattedValue(self, node, result):
         #FormattedValue(value, conversion, format_spec) 3.6
@@ -111,7 +121,7 @@ class PlSqlMaker(ast.NodeVisitor):
         for x in node.elts:
             self.visit(x, result)
             result.add(",")
-        result.add(") /*list*/")
+        result.add(") /*list*/ %s" % loc_tag(node))
         
     def visit_Tuple(self, node, result):
         #Tuple(elts, ctx)
@@ -119,7 +129,7 @@ class PlSqlMaker(ast.NodeVisitor):
         for x in node.elts:
             self.visit(x, result)
             result.add(",")
-        result.add(") /*tuple*/")
+        result.add(") /*tuple*/ %s" % loc_tag(node))
 
     def visit_Set(self, node, result):
         #Set(elts)
@@ -127,7 +137,7 @@ class PlSqlMaker(ast.NodeVisitor):
         for x in node.elts:
             self.visit(x, result)
             result.add(",")
-        result.add(") /*set*/")
+        result.add(") /*set*/ %s" % loc_tag(node))
 
     def visit_Dict(self, node, result):
         #Dict(keys, values)
@@ -172,6 +182,7 @@ class PlSqlMaker(ast.NodeVisitor):
             pass
         else:
             result.add(';')
+            result.add(loc_tag(node))
 
     def visit_NamedExpr(self, node, result):
         #NamedExpr(target, value) >=Py3.8 
@@ -328,6 +339,7 @@ class PlSqlMaker(ast.NodeVisitor):
             fetch = ListX([])
             #self.offset += 1
             fetch.add('\n%sfunction select_into_%s(%s) return boolan as' % (self.indent(), self.autofunc, ', '.join(['%s out %s' % (x, self.locals.get(x,'varchar2')) for x in temp[1:]])))
+            fetch.add(loc_tag(node))
             fetch.add('\n%sbegin' % self.indent())
             self.autofunc += 1
             select = temp[0].strip()[1:-1] # remove quotes
@@ -353,7 +365,7 @@ class PlSqlMaker(ast.NodeVisitor):
                 v = '%s(%s)' % (v, temp[2])
 
             t = self._sys_funcs.get(node.func.id, '')
-            result.insert(self.begin_index(), '\n%s%s%s %s;--from _sys_func' % (self.indent(), t, n, v))  # move before "begin" line # todo: correct insert line position
+            result.insert(self.begin_index(), '\n%s%s%s %s;--from _sys_func%s' % (self.indent(), t, n, v, loc_tag(node)))  # move before "begin" line
             self.funcs[-1] += 1
             if node.func.id == '_var':
                 self.locals[n] = v
@@ -378,6 +390,7 @@ class PlSqlMaker(ast.NodeVisitor):
         result.add('%sif ' % self.indent())
         self.visit(node.test, result)
         result.add(' then')
+        result.add(loc_tag(node))
         self.offset += 1
         self.visit(node.body, result, None)
         self.offset -= 1
@@ -434,6 +447,7 @@ class PlSqlMaker(ast.NodeVisitor):
         result.add(' := ')
         self.visit(node.value, result)
         result.add(';')
+        result.add(loc_tag(node))
 
     def visit_AnnAssign(self, node, result):
         #AnnAssign(target, annotation, value, simple) Py3.6
@@ -443,6 +457,7 @@ class PlSqlMaker(ast.NodeVisitor):
         #? self.visit(node.annotation)
         self.visit(node.value, result)
         result.add(';')
+        result.add(loc_tag(node))
         #? self.visit(node.simple)
 
     def visit_AugAssign(self, node, result):
@@ -454,6 +469,7 @@ class PlSqlMaker(ast.NodeVisitor):
         self.visit(node.op, result)
         self.visit(node.value, result)
         result.add(';')
+        result.add(loc_tag(node))
 
 #Print(dest, values, nl) Py2 only
 
@@ -463,24 +479,28 @@ class PlSqlMaker(ast.NodeVisitor):
         self.visit(node.exc, result)
         result.add(';')
         #? self.visit(node.cause)
+        result.add(loc_tag(node))
 
     def visit_Assert(self, node, result):
         #Assert(test, msg)
         result.add('todo:Assert')
         self.visit(node.test, result)
         self.visit(node.msg, result)
+        result.add(loc_tag(node))
 
 #Delete(targets)
 
     def visit_Pass(self, node, result):
         #Pass
         result.add('\n%snull;' % self.indent())
+        result.add(loc_tag(node))
 
     # Imports
     def visit_Import(self, node, result):
         #Import(names)
         result.add('\n%stodo:Import ' % self.indent())
         self.visit(node.names, result)
+        result.add(loc_tag(node))
 
     def visit_ImportFrom(self, node, result):
         #ImportFrom(module, names, level)
@@ -488,10 +508,12 @@ class PlSqlMaker(ast.NodeVisitor):
         self.visit(node.module, result)
         self.visit(node.names, result)
         self.visit(node.level, result)
+        result.add(loc_tag(node))
 
     def visit_alias(self, node, result):
         #alias(name, asname) TODO:
         result.add('todo:alias %s %s' % (node.name, node.asname))
+        result.add(loc_tag(node))
 
     # Control Flow
     
@@ -501,6 +523,7 @@ class PlSqlMaker(ast.NodeVisitor):
         result.add('\n%sif ' % self.indent())
         self.visit(node.test, result)
         result.add(' then')
+        result.add(loc_tag(node))
         self.offset += 1
         #import pdb; pdb.set_trace()
         self.visit(node.body, result)
@@ -518,6 +541,7 @@ class PlSqlMaker(ast.NodeVisitor):
         self.remove_quote = False
         result.add('\n%s)' % self.indent())
         result.add('\n%sloop' % self.indent())
+        result.add(loc_tag(node))
         self.offset += 1
         self.visit(node.body, result)
         #not used? self.visit(node.orelse)
@@ -530,6 +554,7 @@ class PlSqlMaker(ast.NodeVisitor):
         result.add('\n%swhile ' % self.indent())
         self.visit(node.test, result)
         result.add('\n%sloop' % self.indent())
+        result.add(loc_tag(node))
         self.offset += 1
         self.visit(node.body, result)
         #todo? self.visit(node.orelse, result)
@@ -539,14 +564,17 @@ class PlSqlMaker(ast.NodeVisitor):
     def visit_Break(self, node, result):
         #Break
         result.add('\n%sbreak;' % self.indent())
+        result.add(loc_tag(node))
 
     def visit_Continue(self, node, result):
         #Continue
         result.add('\n%scontinue;' % self.indent())
+        result.add(loc_tag(node))
 
     def visit_Try(self, node, result):
         #Try(body, handlers, orelse, finalbody) >= Py3.3
         result.add('\n%sbegin' % self.indent())
+        result.add(loc_tag(node))
         self.offset += 1
         for x in node.body: self.visit(x, result)
         result.add('\n%sexception ' % self.indent(-1))
@@ -564,6 +592,7 @@ class PlSqlMaker(ast.NodeVisitor):
         result.add('begin\n')
         for x in node.body: self.visit(x, result)
         result.add('\n%sfinally' % self.indent(-1))
+        result.add(loc_tag(node))
         self.visit(node.finalbody, result)
         self.offset -= 1
         result.add("\n%send;" % self.indent())
@@ -574,6 +603,7 @@ class PlSqlMaker(ast.NodeVisitor):
         result.add('\n%sbegin\n%s' % (self.indent(-1), self.indent()))
         for x in node.body: self.visit(x, result)
         result.add('\n%sexception ' % self.indent(-1))
+        result.add(loc_tag(node))
         self.visit(node.handlers, result)
         #todo:self.visit(node.orelse, result)
         self.offset -= 1
@@ -583,8 +613,9 @@ class PlSqlMaker(ast.NodeVisitor):
         #ExceptHandler(type, name, body)
         result.add('when ')
         self.visit(node.type, result)
-        result.add(' then\n')
-        result.add('%s%s := %s;' % (self.indent(), node.name, 'sql%errcode'));
+        result.add(' then')
+        result.add('\n%s%s := %s;' % (self.indent(), node.name, 'sql%errcode'));
+        result.add(loc_tag(node))
         self.visit(node.body, result)
         
 #With(items, body, type_comment)
@@ -601,6 +632,7 @@ class PlSqlMaker(ast.NodeVisitor):
         func.add('\n%sprocedure %s (' % (self.indent(), node.name)) # todo: switch betwee procedure and function
         self.visit(node.args, func)
         func.append(') as')
+        func.add(loc_tag(node))
         # for x in node.decorator_list:
             # #import pdb; pdb.set_trace()
             # self.visit(x, func)
@@ -640,6 +672,7 @@ class PlSqlMaker(ast.NodeVisitor):
         result.add('\n%sreturn ' % self.indent())
         self.visit(node.value, result)
         result.add(';')
+        result.add(loc_tag(node))
 
 #Yield(value)
 #YieldFrom(value)
@@ -655,6 +688,7 @@ class PlSqlMaker(ast.NodeVisitor):
         self.visit(node.kwargs, result)
         self.visit(node.body, result, None)
         self.visit(node.decorator_list, result)
+        result.add(loc_tag(node))
 
     # Async and await
 
@@ -675,18 +709,37 @@ class PlSqlMaker(ast.NodeVisitor):
 #Interactive(stmt* body)
 #Expression(expr body)
 
+LC = re.compile('/\*(\d+):(\d+)\*/')
 
-def do_plsql(fname):
+def transform_file(fname):
     f = open(fname, "rb")
     content = f.read()
     root = ast.parse(content)
     p = PlSqlMaker()
     result = ListX([])
     p.visit(root, result)
-    print(''.join(result))
+    result = ''.join(result).split('\n')
+    line_map = {}
+    for i, line in enumerate(result):
+        m = LC.search(line)
+        if m:
+            line_map[i] = m.groups()
+        #print(line)
+    #print(line_map)
+    return result, line_map
 
 if __name__=='__main__':
-    if len(sys.argv) > 1:
-        do_plsql(sys.argv[1])
+    if len(sys.argv) < 2:
+        print("input file name is required, output file name is optional")
     else:
-        raise  "input file name is required"
+        result, line_map = transform_file(sys.argv[1])
+        if len(sys.argv) > 2:
+            with open(sys.argv[2], 'w') as f:
+                f.writelines((l+'\n' for l in result))
+            if len(sys.argv) > 3:
+                with open(sys.argv[3], 'wb') as f:
+                    f.write(pickle.dumps(line_map))
+        else:
+            for line in result:
+                print(line)
+            print(line_map)
