@@ -294,8 +294,12 @@ class Visitor(ast.NodeVisitor):
 
     def visit_Call(self, node):
         #Call(func, args, keywords, starargs, kwargs)
-        self.trace('call', node.func.id)
         #import pdb; pdb.set_trace()
+        if isinstance(node.func, ast.Name):
+            self.trace('call', node.func.id)
+        else:
+            self.trace('call')
+            self.sub_visit(node.func)
         self.sub_visit(node.args)
         self.sub_visit(node.keywords)
         #<Py3.5 self.sub_visit(node.starargs)
@@ -357,6 +361,7 @@ class Visitor(ast.NodeVisitor):
         #Assign(targets, value, type_comment)
         self.trace('Assign')
         self.sub_visit(node.targets)
+        self.sub_visit(node.value)
 
     def visit_AnnAssign(self, node):
         #AnnAssign(target, annotation, value, simple) Py3.6
@@ -511,12 +516,10 @@ class Visitor(ast.NodeVisitor):
 #Global(names)
 #Nonlocal(names)
     def visit_ClassDef(self, node):
-        #ClassDef(name, bases, keywords, starargs, kwargs, body, decorator_list) 
+        #ClassDef(name, bases, keywords, body, decorator_list) 
         self.trace('ClassDef', node.name)
         self.sub_visit(node.bases)
         self.sub_visit(node.keywords)
-        self.sub_visit(node.starargs)
-        self.sub_visit(node.kwargs)
         self.sub_visit(node.body)
         self.sub_visit(node.decorator_list)
 
