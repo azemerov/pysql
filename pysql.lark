@@ -111,7 +111,7 @@ decl_type: atom_expr
 type_constraint: dotted_name | DEC_NUMBER
 cursor_stmt: "cursor" decl_name [ "(" [parameters] ")" ] query
 query: QSTRING
-fetchinto_stmt: "fetchinto" query "into" names // [ "using" [exprlist] ]
+fetchinto_stmt: "fetch" query "into" names // [ "using" [exprlist] ]
 names: NAME ("," NAME)*
 
 ?compound_stmt: if_stmt | while_stmt | for_stmt | forall_stmt | try_stmt | with_stmt | funcdef | classdef | decorated | async_stmt

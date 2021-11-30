@@ -48,6 +48,22 @@ def requote(value):
     else:
         return value
 
+def strip_type(name):
+    """
+    remove size constraint from the type name
+    """
+    if '(' in name:
+        return name.split('(',1)[0]
+    return name
+
+def loc_tag(node):
+    if isinstance(node, Token):
+        return '/*%s, line:%s*/' % (node.type, node.line)
+    elif isinstance(node, Tree):
+        return '/*%s line:%s*/' % (node.data, node._meta.line)
+    else:
+        breakpoint()
+
 verbose = False
 def trace(*text):
     if verbose:
@@ -59,6 +75,7 @@ class ListX(object):
     def __init__(self):
         self.declarations = []
         self.body = []
+        self.local_vars = {}
     
     def append_decl(self, value):
         self.declarations.append(value)
@@ -106,6 +123,7 @@ class NodeVisitor(object):
 
     def __init__(self):
         self.offset = 0             # defines the indentation level
+        self.autofunc = 1
 
     def indent(self, adjust=0):
         return SP*(self.offset+adjust)
@@ -141,7 +159,7 @@ class NodeVisitor(object):
         trace('import')
         result.append('-- import ')
         self.generic_visit(node, result)
-        result.append(';\n')
+        result.append(';%s\n' % loc_tag(node))
 
     def visit_import_name(self, node, result):
         #trace('import_name')
@@ -174,7 +192,7 @@ class NodeVisitor(object):
         #trace('assign_stmt')
         result.append(self.indent())
         self.generic_visit(node, result)
-        result.append(';\n')
+        result.append(';%s\n' % loc_tag(node))
 
     def visit_assign(self, node, result):
         #trace('assign')
@@ -194,7 +212,7 @@ class NodeVisitor(object):
 
     def visit_if_stmt(self, node, result):
         trace('if, len() = ', len(node.children))
-        result.append('%sif ' % self.indent())
+        result.append('\n%sif ' % self.indent())
         # if [ comparison, suite, elifs [ comparison, suite ], suite ]
         self.visit(node.children[0], result) # comparison
         trace('then')
@@ -210,13 +228,13 @@ class NodeVisitor(object):
             self.visit(node.children[3], result) # else
             self.offset -= 1
         trace('endif')
-        result.append('%send if;\n' % self.indent())
+        result.append('%send if;%s\n' % (self.indent(), loc_tag(node)))
 
     def visit_expr_stmt(self, node, result):
         trace('expr_stmt')
         result.append(self.indent())
         self.generic_visit(node, result)
-        result.append(';\n')
+        result.append(';%s\n' % loc_tag(node))
 
     def visit_elifs(self, node, result):
         #trace('elifs')
@@ -248,7 +266,7 @@ class NodeVisitor(object):
             self.visit(child, result)
 
     def visit_for_stmt(self, node, result):
-        result.append('%sfor ' % self.indent())
+        result.append('\n%sfor ' % self.indent())
         self.visit(node.children[0], result) # for_var
         if isinstance(node.children[1], Tree) and node.children[1].data == 'funccall':
             result.append(' in ')
@@ -256,20 +274,20 @@ class NodeVisitor(object):
             result.append(' in (')
         self.visit(node.children[1], result) # iterator
         if isinstance(node.children[1], Tree) and node.children[1].data == 'funccall':
-            result.append(' loop\n')
+            result.append(' loop%s\n' % loc_tag(node))
         else:
-            result.append(')\n%sloop\n' % (self.indent(),))
+            result.append(')\n%sloop%s\n' % (self.indent(), loc_tag(node)))
         self.offset += 1
         self.visit(node.children[2], result) # suite
         self.offset -= 1
         result.append('%send loop;\n' % self.indent())
 
     def visit_forall_stmt(self, node, result):
-        result.append('%sforall ' % self.indent())
+        result.append('\n%sforall ' % self.indent())
         self.visit(node.children[0], result) # for_var
         result.append(' in ')
         self.visit(node.children[1], result) # iterator
-        result.append(' --save exception\n')
+        result.append(' --save exception %s\n' % loc_tag(node))
         self.offset += 1
         self.visit(node.children[2], result) # suite
         self.offset -= 1
@@ -277,7 +295,7 @@ class NodeVisitor(object):
     def visit_while_stmt(self, node, result):
         result.append('%swhile ' % self.indent())
         self.visit(node.children[0], result) # condition
-        result.append('\n%sloop\n' % (self.indent(),))
+        result.append('\n%sloop %s\n' % (self.indent(), loc_tag(node)))
         self.offset += 1
         self.visit(node.children[1], result) # suite
         self.offset -= 1
@@ -294,8 +312,8 @@ class NodeVisitor(object):
         self.visit(node.children[1], result)
         result.append(' from')
         result.append(tmp[1])
-        result.append(';\n')
-        
+        result.append(';%s\n' % loc_tag(node))
+
     def visit_names(self, node, result):
         for i, child in enumerate(node.children):
             if i:
@@ -364,9 +382,9 @@ class NodeVisitor(object):
         i = 0
         trace(node.children[i]) # function name
         if self._decorator:
-            result.append_decl('%sfunction ' % self.indent())
+            result.append_decl('\n%sfunction ' % self.indent())
         else:
-            result.append_decl('%sprocedure ' % self.indent())
+            result.append_decl('\n%sprocedure ' % self.indent())
         self.visit(node.children[i], result.declarations) # function name
         i += 1
         if node.children[i].data.value == 'parameters':
@@ -416,7 +434,7 @@ class NodeVisitor(object):
         trace('return')
         result.append('%sreturn ' % self.indent());
         self.visit(node.children[0], result)
-        result.append(';\n')
+        result.append(';%s\n' % loc_tag(node))
 
     def visit_funccall(self, node, result):
         tmp = ListX()
@@ -441,11 +459,38 @@ class NodeVisitor(object):
             result.append('open %s' % tmp[2])
         elif tmp[0] == 'close':
             result.append('close %s' % tmp[2])
-        elif tmp[0] == 'fetch':
-            result.append('fetch %s into %s; exit when %s%%notfound' % (tmp[2], tmp[4], tmp[2])) # todo: emulate function call with result
         elif tmp[0] == 'exec':
             result.append('exec ')
             result.extend(tmp[2:-1]) # remove outer parenthesis
+        elif tmp[0] == 'cfetch':
+            result.append('fetch %s into %s' % (tmp[2], tmp[4]))
+        elif tmp[0] == 'cfetch_break':
+            result.append('fetch %s into %s; exit when %s%%notfound' % (tmp[2], tmp[4], tmp[2]))
+        elif tmp[0] == 'notfound':
+            result.append('%s%%notfound' % tmp[2])
+        elif tmp[0] == 'fetch': #selectinto
+            tmp = [x for x in tmp if x.strip() not in ('(', ',', ')')]
+            select = unquote(tmp[1])
+            params = tmp[2:]
+            result.append_decl('\n%sfunction select_into_%s(%s) return boolean as' % (
+                self.indent(),
+                self.autofunc,
+                ', '.join(['%s out %s' % (x, strip_type(result.local_vars.get(x,'varchar2'))) for x in params]))
+                )
+            result.append_decl(loc_tag(node))
+            result.append_decl('\n')
+            result.append_decl('%sbegin\n' % self.indent())
+            i = select.find('from')
+            select = select[:i] + ' into %s' % ', '.join(params) +' '+select[i:]
+            result.append_decl('%s  %s;\n' % (self.indent(), select))
+            result.append_decl('%s  return True;\n' % self.indent())
+            result.append_decl('%sexception when no_data_found then\n' % self.indent())
+            result.append_decl('%s  return False;\n' % self.indent())
+            result.append_decl('%send;\n' % self.indent())
+
+            result.append('select_into_%d(%s)' % (self.autofunc, ', '.join(params)))
+            self.autofunc += 1
+            # also see visit_Expr() which has explicitly removre ';' after  pseudo function calls
         else:
             result.append(''.join(tmp)) # .extend(tmp)
 
@@ -480,6 +525,9 @@ class NodeVisitor(object):
         self.visit(node.children[1], result) # operator
         self.visit(node.children[2], result) # 2nd argument
 
+    def visit_break_stmt(self, node, result):
+        result.append('%sbreak;\n' % self.indent())
+
     def visit___ANON_18(self, node, result):
         trace('==')
         result.append(' = ')
@@ -497,7 +545,7 @@ class NodeVisitor(object):
 
     def visit_try_stmt(self, node, result):
         trace('try')
-        result.append('%sbegin --TRY\n' % self.indent())
+        result.append('\n%sbegin --TRY %s\n' % (self.indent(), loc_tag(node)))
         self.visit(node.children[0], result) # suite
         for child in node.children[1].children: # list of excepts
             self.visit(child, result) 
@@ -523,14 +571,14 @@ class NodeVisitor(object):
 
     def visit_raise_stmt(self, node, result):
         if node.children[0].data == 'tuple':
-            result.append('\n%sraise_application_error' % self.indent())
+            result.append('%sraise_application_error' % self.indent())
             self.visit(node.children[0], result)
         elif isinstance(node.children[0], Tree) and node.children[0].children[0].type=='STRING':
-            result.append('\n%sraise_application_error(-20000, %s)' % (self.indent(), requote(node.children[0].children[0].value)))
+            result.append('%sraise_application_error(-20000, %s)' % (self.indent(), requote(node.children[0].children[0].value)))
         else:
-            result.append('\n%sraise ' % self.indent())
+            result.append('%sraise ' % self.indent())
             self.generic_visit(node, result)
-        result.append(';\n')
+        result.append(';%s\n' % loc_tag(node))
 
     def visit_exception_stmt(self, node, result): # todo: rename to exception_decl_stmt
         result.append_decl(self.indent())
@@ -541,7 +589,7 @@ class NodeVisitor(object):
         self.visit(node.children[1], result.declarations)
         if len(node.children) > 2: # if we have number with negation
             self.visit(node.children[2], result.declarations)
-        result.append_decl(');\n')
+        result.append_decl('); %s\n' % loc_tag(node))
 
     def visit_tuple(self, node, result):
         result.append('(')
@@ -610,6 +658,7 @@ class NodeVisitor(object):
         # variable declaration
         result.append_decl(self.indent())
         self.visit(node.children[0], result.declarations) # variable name
+        var_name = result.declarations[-1]
         result.append_decl(' ')
         tmp = ListX()
         self.visit(node.children[1], tmp) # variable type
@@ -617,6 +666,7 @@ class NodeVisitor(object):
             result.append_decl('%s%%rowtype' % '.'.join(tmp[2:-1]))
         else:
             result.extend_decl(tmp)
+            result.local_vars[var_name] = ''.join(tmp)
             if len(node.children) > 2:
                 result.append_decl(' := ')
                 self.visit(node.children[2], result.declarations)
@@ -628,7 +678,7 @@ class NodeVisitor(object):
                 result.append_decl(' := ')
                 self.visit(node.children[3], result.declarations)
         del tmp
-        result.append_decl(';\n')
+        result.append_decl(';%s\n' % loc_tag(node))
 
     def visit_decl_name(self, node, result):
         result.append(node.children[0].value)
@@ -657,7 +707,7 @@ class NodeVisitor(object):
             self.visit(node.children[2], result.declarations)
         else:
             self.visit(node.children[1], result.declarations)
-        result.append_decl(';\n')
+        result.append_decl(';%s\n' % loc_tag(node))
 
     def visit_IN(self, node, result):
         result.append(' in ')
@@ -666,34 +716,6 @@ class NodeVisitor(object):
         result.append('not ')
         self.generic_visit(node, result)
 
-    # def visit_array_type_stmt(self, node, result):
-        # """decl_name decl_type [type_constraint]"""
-        # result.append('%stype ' % self.indent())
-        # self.visit(node.children[0], result) # decl_name
-        # result.append(' is varray(')
-        # self.visit(node.children[1], result) # type_constraint - size
-        # result.append(") of ")
-        # self.visit(node.children[2], result) # decl_type
-        # if len(node.children) > 3:
-            # result.append("(")
-            # self.visit(node.children[3], result) # type_constraint
-            # result.append(")")
-        # result.append(';\n')
-
-    # def visit_dict_type_stmt(self, node, result):
-        # """"dictionary" "type" decl_name "[" decl_type [ "(" type_constraint ")" ] "]" "of" decl_type [ "(" type_constraint ")" ]"""
-        # result.append('%stype ' % self.indent())
-        # self.visit(node.children[0], result) # decl_name
-        # result.append(' is table of ')
-        # self.visit(node.children[1], result) # type_constraint - size
-        # result.append(" index by ")
-        # self.visit(node.children[2], result) # decl_type
-        # if len(node.children) > 3:
-            # result.append("(")
-            # self.visit(node.children[3], result) # type_constraint
-            # result.append(")")
-        # result.append(';\n')
-
     def visit_type_stmt(self, node, result):
         """"array" "type" decl_name "[" type_constraint "]" "of" decl_type [ "(" type_constraint ")" ]"""
         tmp = ListX()
@@ -701,44 +723,17 @@ class NodeVisitor(object):
             self.visit(child, tmp)
         name = tmp[0]
         if tmp[1] == 'record':
-            result.append_decl('%stype %s is record ( TODO!!! );\n' % ( self.indent(), name))
+            result.append_decl('%stype %s is record ( TODO!!! ); %s\n' % ( self.indent(), name, loc_tag(node)))
         elif tmp[1] == 'array':
             size = tmp[2]
             subtype = tmp[3]
-            result.append_decl('%stype %s is varray(%s) of %s;\n' % ( self.indent(), name, size, subtype))
+            result.append_decl('%stype %s is varray(%s) of %s; %s\n' % ( self.indent(), name, size, subtype, loc_tag(node)))
         elif tmp[1] == 'dict':
             subtype = tmp[2]
             index = tmp[3]
-            result.append_decl('%stype %s is table of %s index by %s;\n' % ( self.indent(), name, index, subtype))
+            result.append_decl('%stype %s is table of %s index by %s; %s\n' % ( self.indent(), name, index, subtype, loc_tag(node)))
         del tmp
         return
-
-        tmp = ListX()
-        self.visit(node.children[1], tmp) # type_constraint - size
-        self.visit(node.children[2], tmp) # decl_type
-        if len(node.children) > 3:
-            self.visit(node.children[3], tmp) # type_constraint
-
-        if len(tmp) == 1:
-            result.append(tmp[0])
-        elif len(tmp) > 1:
-            if tmp[0]=='/*<list>*/':
-                type_name = tmp[1]
-                nums  = [x for x in tmp[2:] if x.isnumeric()]
-                if len(nums)==1:
-                    result.append('varray(%s) of %s' % (nums[2], nums[1]))
-                else:
-                    result.append(tmp[1])
-            elif tmp[0]=='/*<dict>*/':
-                pass
-            else:
-                result.extend(tmp)
-        del tmp
-        if len(node.children) > 2:
-            result.append('(')
-            self.visit(node.children[2], result) # type_constraint
-            result.append(')')
-        result.append(';\n')
 
     def visit_type_size(self, node, result):
         self.visit(node.children[0], result)
@@ -762,7 +757,7 @@ class NodeVisitor(object):
             result.append_decl('(')
             self.visit(node.children[2], result.declarations) # type_constraint
             result.append_decl(')')
-        result.append_decl(';\n')
+        result.append_decl('; %s\n' % loc_tag(node))
 
     def visit_list(self, node, result):
         result.append('/*<list>*/')
@@ -781,6 +776,7 @@ if __name__ == '__main__':
     
     infile = None
     outfile = None
+    mapfile = None
     for arg in sys.argv[1:]:
         if arg in ('-v', '--verbose'):
             verbose = True
@@ -788,7 +784,9 @@ if __name__ == '__main__':
             infile = arg
         elif not outfile:
             outfile = arg
-    
+        elif not mapfile:
+            mapfile = arg
+
     with open(infile, 'r') as f:
         lines = f.readlines()
         if not lines[-1].endswith('\n'):
@@ -809,9 +807,29 @@ if __name__ == '__main__':
         else:
             out = sys.stdout
 
+        i = 1
+        LC = re.compile('/\*.+?\sline\:(\d+)\*/') # like /*xxx 123*/
+        line_map = []
         if result.declarations:
             for x in ''.join(result.declarations).split('\n'):
                 print(x, file=out)
+                m = LC.search(x)
+                if m:
+                    #line_map[i] = m.groups()
+                    line_map.append('%s=%s\n' % (i, m.group(1)))
+                i += 1
         if result.body:
             for x in ''.join(result.body).split('\n'):
                 print(x, file=out)
+                m = LC.search(x)
+                if m:
+                    #line_map[i] = m.groups()
+                    line_map.append('%s=%s\n' % (i, m.group(1)))
+                i += 1
+        if mapfile:
+            #with open(mapfile, 'wb') as f:
+            #    f.write(pickle.dumps(line_map))
+            with open(mapfile, 'w') as f:
+                for x in line_map:
+                    f.write(x)
+
